@@ -18,7 +18,12 @@ for pair in "dino.png:dino.png" \
             "dino-working.gif:dino-working.gif" \
             "maomao/maomao-kusuriya-idle.gif:maomao-idle.gif" \
             "maomao/maomao-kusuriya-review.gif:maomao-review.gif" \
-            "maomao/maomao-kusuriya-jumping.gif:maomao-jumping.gif"; do
+            "maomao/maomao-kusuriya-jumping.gif:maomao-jumping.gif" \
+            "frieren/frieren-idle.gif:frieren-idle.gif" \
+            "frieren/frieren-review.gif:frieren-review.gif" \
+            "frieren/frieren-jumping.gif:frieren-jumping.gif" \
+            "frieren/frieren-waiting.gif:frieren-waiting.gif" \
+            "frieren/frieren-failed.gif:frieren-failed.gif"; do
   src="${pair%%:*}"; dst="${pair##*:}"
   if [ -f "$src" ]; then
     mkdir -p "$APP/Contents/Resources"

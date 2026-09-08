@@ -44,12 +44,13 @@ enum DinoState: String {
 
 /// Selectable character. Persisted in UserDefaults ("dino.skin").
 enum Skin: String, CaseIterable {
-    case capy, maomao
+    case capy, maomao, frieren
 
     var title: String {
         switch self {
-        case .capy:   return "Capybara"
-        case .maomao: return "MaoMao"
+        case .capy:    return "Capybara"
+        case .maomao:  return "MaoMao"
+        case .frieren: return "Frieren"
         }
     }
 }
@@ -65,6 +66,12 @@ enum Sprite {
     static let maomaoWorking = find(fileNames: ["maomao-review.gif", "maomao/maomao-kusuriya-review.gif"])
     static let maomaoDone    = find(fileNames: ["maomao-jumping.gif", "maomao/maomao-kusuriya-jumping.gif"])
 
+    static let frierenIdle    = find(fileNames: ["frieren-idle.gif", "frieren/frieren-idle.gif"])
+    static let frierenWorking = find(fileNames: ["frieren-review.gif", "frieren/frieren-review.gif"])
+    static let frierenDone    = find(fileNames: ["frieren-jumping.gif", "frieren/frieren-jumping.gif"])
+    static let frierenWaiting = find(fileNames: ["frieren-waiting.gif", "frieren/frieren-waiting.gif"])
+    static let frierenError   = find(fileNames: ["frieren-failed.gif", "frieren/frieren-failed.gif"])
+
     /// Sprite for a skin + state. `animated == true` → GIF, play via NSImageView.
     static func sprite(skin: Skin, state: DinoState) -> (image: NSImage, animated: Bool)? {
         switch skin {
@@ -78,6 +85,17 @@ enum Sprite {
             case .working: gif = maomaoWorking ?? maomaoIdle
             case .done:    gif = maomaoDone ?? maomaoIdle
             default:       gif = maomaoIdle
+            }
+            if let g = gif { return (g, true) }
+            return sprite(skin: .capy, state: state)
+        case .frieren:
+            let gif: NSImage?
+            switch state {
+            case .working: gif = frierenWorking ?? frierenIdle
+            case .done:    gif = frierenDone ?? frierenIdle
+            case .waiting: gif = frierenWaiting ?? frierenIdle
+            case .error:   gif = frierenError ?? frierenIdle
+            case .idle:    gif = frierenIdle
             }
             if let g = gif { return (g, true) }
             return sprite(skin: .capy, state: state)
