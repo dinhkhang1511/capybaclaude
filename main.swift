@@ -42,43 +42,83 @@ enum DinoState: String {
 
 // MARK: - Sprite
 
-/// Dino sprite image, resolved once at launch.
-/// Lookup order: $DINO_IMAGE → dino.png in the app bundle's Resources →
-/// dino.png next to the executable. Falls back to the 🦖 emoji when none exist.
+/// Selectable character. Persisted in UserDefaults ("dino.skin").
+enum Skin: String, CaseIterable {
+    case capy, maomao
+
+    var title: String {
+        switch self {
+        case .capy:   return "Capybara"
+        case .maomao: return "MaoMao"
+        }
+    }
+}
+
+/// Sprite images, resolved once at launch.
+/// Lookup order per file: env override → app bundle Resources → next to the
+/// executable. Falls back to the 🦖 emoji when nothing exists.
 enum Sprite {
-    static let image: NSImage? = find(envKey: "DINO_IMAGE", fileName: "dino.png")
+    static let capyIdle    = find(envKey: "DINO_IMAGE", fileNames: ["dino.png"])
+    static let capyWorking = find(envKey: "DINO_WORKING_IMAGE", fileNames: ["dino-working.gif"])
 
-    /// Animated sprite shown while Claude is working (GIF, played via NSImageView).
-    static let workingImage: NSImage? = find(envKey: "DINO_WORKING_IMAGE",
-                                             fileName: "dino-working.gif")
+    static let maomaoIdle    = find(fileNames: ["maomao-idle.gif", "maomao/maomao-kusuriya-idle.gif"])
+    static let maomaoWorking = find(fileNames: ["maomao-review.gif", "maomao/maomao-kusuriya-review.gif"])
+    static let maomaoDone    = find(fileNames: ["maomao-jumping.gif", "maomao/maomao-kusuriya-jumping.gif"])
 
-    private static func find(envKey: String, fileName: String) -> NSImage? {
+    /// Sprite for a skin + state. `animated == true` → GIF, play via NSImageView.
+    static func sprite(skin: Skin, state: DinoState) -> (image: NSImage, animated: Bool)? {
+        switch skin {
+        case .capy:
+            if state == .working, let g = capyWorking { return (g, true) }
+            if let i = capyIdle { return (i, false) }
+            return nil
+        case .maomao:
+            let gif: NSImage?
+            switch state {
+            case .working: gif = maomaoWorking ?? maomaoIdle
+            case .done:    gif = maomaoDone ?? maomaoIdle
+            default:       gif = maomaoIdle
+            }
+            if let g = gif { return (g, true) }
+            return sprite(skin: .capy, state: state)
+        }
+    }
+
+    /// Small copy for the menu bar (status items want ~18 pt).
+    static func statusIcon(for skin: Skin) -> NSImage? {
+        guard let img = sprite(skin: skin, state: .idle)?.image,
+              let copy = img.copy() as? NSImage else { return nil }
+        copy.size = NSSize(width: 18, height: 18)
+        return copy
+    }
+
+    private static func find(envKey: String? = nil, fileNames: [String]) -> NSImage? {
         var candidates: [URL] = []
-        if let p = ProcessInfo.processInfo.environment[envKey], !p.isEmpty {
+        if let envKey,
+           let p = ProcessInfo.processInfo.environment[envKey], !p.isEmpty {
             candidates.append(URL(fileURLWithPath: (p as NSString).expandingTildeInPath))
         }
-        if let res = Bundle.main.resourceURL {
-            candidates.append(res.appendingPathComponent(fileName))
+        for name in fileNames {
+            if let res = Bundle.main.resourceURL {
+                candidates.append(res.appendingPathComponent(name))
+            }
+            candidates.append(Bundle.main.bundleURL.deletingLastPathComponent()
+                .appendingPathComponent(name))
         }
-        candidates.append(Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent(fileName))
         for url in candidates {
             if let img = NSImage(contentsOf: url), img.isValid { return img }
         }
         return nil
-    }
-
-    /// Small copy for the menu bar (status items want ~18 pt).
-    static var statusIcon: NSImage? {
-        guard let img = image, let copy = img.copy() as? NSImage else { return nil }
-        copy.size = NSSize(width: 18, height: 18)
-        return copy
     }
 }
 
 // MARK: - Model
 
 final class DinoModel: ObservableObject {
+    @Published var skin: Skin =
+        Skin(rawValue: UserDefaults.standard.string(forKey: "dino.skin") ?? "") ?? .capy {
+        didSet { UserDefaults.standard.set(skin.rawValue, forKey: "dino.skin") }
+    }
     @Published var state: DinoState = .idle
     @Published var title: String = "Claude Code"
     @Published var message: String = ""
@@ -134,7 +174,13 @@ struct AnimatedImageView: NSViewRepresentable {
         return v
     }
 
-    func updateNSView(_ v: NSImageView, context: Context) {}
+    func updateNSView(_ v: NSImageView, context: Context) {
+        // State/skin switches swap the GIF — restart animation on the new one.
+        if v.image !== image {
+            v.image = image
+            v.animates = true
+        }
+    }
 }
 
 struct DinoOverlay: View {
@@ -180,21 +226,23 @@ struct DinoOverlay: View {
         .shadow(color: .black.opacity(0.28), radius: 14, y: 5)
     }
 
-    private var usingWorkingGif: Bool {
-        model.state == .working && Sprite.workingImage != nil
+    private var currentSprite: (image: NSImage, animated: Bool)? {
+        Sprite.sprite(skin: model.skin, state: model.state)
     }
 
     @ViewBuilder
     private var sprite: some View {
-        if usingWorkingGif, let gif = Sprite.workingImage {
-            AnimatedImageView(image: gif)
-                .frame(width: 56, height: 56)
-        } else if let img = Sprite.image {
-            Image(nsImage: img)
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
-                .frame(width: 56, height: 56)
+        if let s = currentSprite {
+            if s.animated {
+                AnimatedImageView(image: s.image)
+                    .frame(width: 56, height: 56)
+            } else {
+                Image(nsImage: s.image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 56, height: 56)
+            }
         } else {
             Text("🦖")
                 .font(.system(size: 50))
@@ -204,8 +252,8 @@ struct DinoOverlay: View {
     private var dino: some View {
         ZStack(alignment: .topTrailing) {
             sprite
-                // GIF animates by itself — no wobble on top of it.
-                .rotationEffect(.degrees(usingWorkingGif ? 0
+                // GIFs animate by themselves — no wobble on top of them.
+                .rotationEffect(.degrees((currentSprite?.animated ?? false) ? 0
                                          : model.state == .working ? (bob ? -7 : 7)
                                          : (bob ? -2 : 2)),
                                 anchor: .bottom)
@@ -371,7 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let icon = Sprite.statusIcon {
+        if let icon = Sprite.statusIcon(for: model.skin) {
             statusItem.button?.image = icon
         } else {
             statusItem.button?.title = "🦖"
@@ -399,6 +447,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(posItem)
         menu.setSubmenu(pos, for: posItem)
 
+        let skinItem = NSMenuItem(title: "Nhân vật", action: nil, keyEquivalent: "")
+        let skins = NSMenu()
+        for skin in Skin.allCases {
+            let it = NSMenuItem(title: skin.title, action: #selector(setSkin(_:)), keyEquivalent: "")
+            it.representedObject = skin.rawValue
+            it.target = self
+            it.state = (skin == model.skin) ? .on : .off
+            skins.addItem(it)
+        }
+        menu.addItem(skinItem)
+        menu.setSubmenu(skins, for: skinItem)
+
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Dino", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -421,6 +481,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                    message: moveMode ? "Kéo dino tới chỗ bạn muốn, rồi tắt Move mode."
                                      : "Đã khoá lại (click-through).",
                    ttl: 4)
+    }
+
+    @objc private func setSkin(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let skin = Skin(rawValue: raw) else { return }
+        model.skin = skin
+        sender.menu?.items.forEach { $0.state = ($0 === sender) ? .on : .off }
+        if let icon = Sprite.statusIcon(for: skin) {
+            statusItem.button?.image = icon
+            statusItem.button?.title = ""
+        }
+        // .done doubles as a preview of the skin's "success" sprite.
+        model.push(state: .done, title: "Dino", message: "Đã chuyển sang \(skin.title)!", ttl: 4)
     }
 
     @objc private func setCorner(_ sender: NSMenuItem) {

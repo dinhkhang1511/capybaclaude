@@ -93,6 +93,7 @@ System Settings → General → Login Items → `+` → `~/Applications/Dino.app
 | Đổi port | env `DINO_PORT=9000` khi launch |
 | Đổi sprite | Đặt file `dino.png` cạnh `main.swift` rồi `./build.sh` (hoặc set env `DINO_IMAGE=/path/to/img.png`). Không có file → fallback về emoji 🦖 |
 | Sprite khi đang chạy | Đặt GIF `dino-working.gif` cạnh `main.swift` (hoặc env `DINO_WORKING_IMAGE`) — tự play khi state = working, hết working thì về `dino.png` |
+| Đổi nhân vật | Menu bar → **Nhân vật** → Capybara / MaoMao (lưu vào UserDefaults). MaoMao: idle gif bình thường, review gif khi working, jumping gif khi done. Sprites lấy từ `maomao/*.gif` |
 | Đổi âm thanh | `DinoState.systemSound` — tên file trong `/System/Library/Sounds` |
 | Cắt message ngắn hơn | `AppDelegate.clean()`, hằng `240` |
 | Luôn ẩn dino khi idle | `DinoOverlay.dino` → `.opacity(... ? 0 : 1)` |

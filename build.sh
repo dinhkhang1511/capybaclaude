@@ -12,12 +12,18 @@ mkdir -p "$APP/Contents/MacOS"
 swiftc -O main.swift -o "$APP/Contents/MacOS/Dino"
 
 # Bundle sprite assets if provided next to main.swift.
-# dino.png = idle sprite, dino-working.gif = animated sprite while working.
-for asset in dino.png dino-working.gif; do
-  if [ -f "$asset" ]; then
+# Capy skin: dino.png (idle) + dino-working.gif (working).
+# MaoMao skin: maomao/*.gif → canonical names (idle / review→working / jumping→done).
+for pair in "dino.png:dino.png" \
+            "dino-working.gif:dino-working.gif" \
+            "maomao/maomao-kusuriya-idle.gif:maomao-idle.gif" \
+            "maomao/maomao-kusuriya-review.gif:maomao-review.gif" \
+            "maomao/maomao-kusuriya-jumping.gif:maomao-jumping.gif"; do
+  src="${pair%%:*}"; dst="${pair##*:}"
+  if [ -f "$src" ]; then
     mkdir -p "$APP/Contents/Resources"
-    cp "$asset" "$APP/Contents/Resources/$asset"
-    echo "▸ Bundled $asset."
+    cp "$src" "$APP/Contents/Resources/$dst"
+    echo "▸ Bundled $dst."
   fi
 done
 
