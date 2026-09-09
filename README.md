@@ -3,7 +3,24 @@
 Con dino nổi trên mọi màn hình / Space / app (kể cả Chrome full-screen), hiện bubble
 mỗi khi Claude Code chạy xong, cần xác nhận, hoặc lỗi.
 
-## 1. Build
+## 1. Cài đặt
+
+### Cách nhanh — 1 dòng curl, không cần git clone
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dinhkhang1511/capybaclaude/main/install.sh | bash
+```
+
+Thêm `-s -- --hooks` để tự nối vào Claude Code luôn (merge `claude-hooks.json`
+vào `~/.claude/settings.json`, có dedupe — chạy lại không bị trùng):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dinhkhang1511/capybaclaude/main/install.sh | bash -s -- --hooks
+```
+
+Cài từ branch khác: `... | bash -s -- --branch maomao`.
+
+### Build từ source
 
 ```bash
 chmod +x build.sh
