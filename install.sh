@@ -35,7 +35,7 @@ if [ "$PREBUILT" = 1 ]; then
   mkdir -p "$HOME/Applications"
   rm -rf "$HOME/Applications/Dino.app"
   ditto -x -k "$TMP/Dino.app.zip" "$HOME/Applications"
-  xattr -dr com.apple.quarantine "$HOME/Applications/Dino.app" 2>/dev/null || true
+  xattr -d com.apple.quarantine "$HOME/Applications/Dino.app" >/dev/null 2>&1 || true
   pkill -x Dino 2>/dev/null || true
   sleep 0.3
   open "$HOME/Applications/Dino.app"
