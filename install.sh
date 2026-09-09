@@ -4,34 +4,52 @@
 # Options (pass after `bash -s --`):
 #   --branch <name>   install from a branch (default: main)
 #   --hooks           also merge claude-hooks.json into ~/.claude/settings.json
+#   --prebuilt        skip compiling: download dist/Dino.app.zip (universal,
+#                     macOS 13+). Auto-selected when swiftc is unavailable.
 set -euo pipefail
 
 REPO="dinhkhang1511/capybaclaude"
 BRANCH="main"
 MERGE_HOOKS=0
+PREBUILT=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --branch) BRANCH="$2"; shift 2 ;;
-    --hooks)  MERGE_HOOKS=1; shift ;;
+    --branch)   BRANCH="$2"; shift 2 ;;
+    --hooks)    MERGE_HOOKS=1; shift ;;
+    --prebuilt) PREBUILT=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
-if ! command -v swiftc >/dev/null 2>&1; then
-  echo "✗ Cần Xcode Command Line Tools (swiftc). Chạy: xcode-select --install" >&2
-  exit 1
+if [ "$PREBUILT" = 0 ] && ! command -v swiftc >/dev/null 2>&1; then
+  echo "▸ Không có swiftc — chuyển sang bản prebuilt."
+  PREBUILT=1
 fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "▸ Downloading ${REPO}@${BRANCH}..."
-curl -fsSL "https://codeload.github.com/$REPO/tar.gz/refs/heads/$BRANCH" | tar -xz -C "$TMP"
-SRC="$TMP/$(basename "$REPO")-$BRANCH"
-
-cd "$SRC"
-chmod +x build.sh
-./build.sh
+if [ "$PREBUILT" = 1 ]; then
+  echo "▸ Downloading prebuilt Dino.app (${BRANCH})..."
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$BRANCH/dist/Dino.app.zip" -o "$TMP/Dino.app.zip"
+  mkdir -p "$HOME/Applications"
+  rm -rf "$HOME/Applications/Dino.app"
+  ditto -x -k "$TMP/Dino.app.zip" "$HOME/Applications"
+  xattr -dr com.apple.quarantine "$HOME/Applications/Dino.app" 2>/dev/null || true
+  pkill -x Dino 2>/dev/null || true
+  sleep 0.3
+  open "$HOME/Applications/Dino.app"
+  echo "✓ Installed $HOME/Applications/Dino.app"
+  SRC="$TMP"
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$BRANCH/claude-hooks.json" -o "$SRC/claude-hooks.json"
+else
+  echo "▸ Downloading ${REPO}@${BRANCH}..."
+  curl -fsSL "https://codeload.github.com/$REPO/tar.gz/refs/heads/$BRANCH" | tar -xz -C "$TMP"
+  SRC="$TMP/$(basename "$REPO")-$BRANCH"
+  cd "$SRC"
+  chmod +x build.sh
+  ./build.sh
+fi
 
 if [ "$MERGE_HOOKS" = 1 ]; then
   echo "▸ Merging Claude Code hooks…"
