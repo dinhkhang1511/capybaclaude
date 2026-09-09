@@ -3,7 +3,24 @@
 Con dino nổi trên mọi màn hình / Space / app (kể cả Chrome full-screen), hiện bubble
 mỗi khi Claude Code chạy xong, cần xác nhận, hoặc lỗi.
 
-## 1. Build
+## 1. Cài đặt
+
+### Cách nhanh — 1 dòng curl, không cần git clone
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dinhkhang1511/capybaclaude/main/install.sh | bash
+```
+
+Thêm `-s -- --hooks` để tự nối vào Claude Code luôn (merge `claude-hooks.json`
+vào `~/.claude/settings.json`, có dedupe — chạy lại không bị trùng):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dinhkhang1511/capybaclaude/main/install.sh | bash -s -- --hooks
+```
+
+Cài từ branch khác: `... | bash -s -- --branch maomao`.
+
+### Build từ source
 
 ```bash
 chmod +x build.sh
@@ -93,6 +110,9 @@ System Settings → General → Login Items → `+` → `~/Applications/Dino.app
 | Đổi port | env `DINO_PORT=9000` khi launch |
 | Đổi sprite | Đặt file `dino.png` cạnh `main.swift` rồi `./build.sh` (hoặc set env `DINO_IMAGE=/path/to/img.png`). Không có file → fallback về emoji 🦖 |
 | Sprite khi đang chạy | Đặt GIF `dino-working.gif` cạnh `main.swift` (hoặc env `DINO_WORKING_IMAGE`) — tự play khi state = working, hết working thì về `dino.png` |
+| Thêm pet mới | Menu bar → **Nhân vật** → **Thêm pet từ link…** → dán link `codex-pets.net/#/pets/<id>` (tự prefill nếu link đang ở clipboard). App tải spritesheet về `~/Library/Application Support/Dino/pets/<id>/`, cắt frame và chuyển sang pet mới luôn — không cần rebuild |
+| Zoom sprite | Menu bar → **Kích thước** → Nhỏ 56 / Vừa 80 / Lớn 110 / Bự 150pt (lưu vào UserDefaults) |
+| Đổi nhân vật | Menu bar → **Nhân vật** → Capybara / MaoMao / Frieren / Nezuko (lưu vào UserDefaults). MaoMao: idle / review (working) / jumping (done) từ `maomao/*.gif`. Frieren & Nezuko: thêm cả waiting + failed (error) — cắt từ spritesheet của [codex-pets.net](https://codex-pets.net) ([frieren](https://codex-pets.net/#/pets/frieren) by rudoduro, [nezu](https://codex-pets.net/#/pets/nezu) by dc); Nezuko dùng row "running" (gõ laptop) khi working |
 | Đổi âm thanh | `DinoState.systemSound` — tên file trong `/System/Library/Sounds` |
 | Cắt message ngắn hơn | `AppDelegate.clean()`, hằng `240` |
 | Luôn ẩn dino khi idle | `DinoOverlay.dino` → `.opacity(... ? 0 : 1)` |

@@ -42,43 +42,244 @@ enum DinoState: String {
 
 // MARK: - Sprite
 
-/// Dino sprite image, resolved once at launch.
-/// Lookup order: $DINO_IMAGE → dino.png in the app bundle's Resources →
-/// dino.png next to the executable. Falls back to the 🦖 emoji when none exist.
+/// Selectable character. Persisted in UserDefaults ("dino.skin").
+enum Skin: String, CaseIterable {
+    case capy, maomao, frieren, nezuko
+
+    var title: String {
+        switch self {
+        case .capy:    return "Capybara"
+        case .maomao:  return "MaoMao"
+        case .frieren: return "Frieren"
+        case .nezuko:  return "Nezuko"
+        }
+    }
+}
+
+/// One renderable sprite: a still image, a GIF (NSImageView plays it), or a
+/// frame sequence sliced from a downloaded spritesheet (stepped by a timer).
+enum SpriteAsset {
+    case still(NSImage)
+    case gif(NSImage)
+    case frames([NSImage])
+
+    var isStill: Bool { if case .still = self { return true }; return false }
+
+    var previewImage: NSImage? {
+        switch self {
+        case .still(let i), .gif(let i): return i
+        case .frames(let f):             return f.first
+        }
+    }
+}
+
+/// A pet downloaded from codex-pets.net, stored in Application Support.
+struct Pet {
+    let id: String
+    let name: String
+    let frames: [DinoState: [NSImage]]
+}
+
+/// Manages downloaded pets: ~/Library/Application Support/Dino/pets/<id>/
+/// (spritesheet.webp + meta.json), sliced into frames at load time.
+final class PetLibrary {
+    static let shared = PetLibrary()
+    private(set) var pets: [Pet] = []
+
+    struct InstallError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    private var dir: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Dino/pets", isDirectory: true)
+    }
+
+    func pet(id: String) -> Pet? { pets.first { $0.id == id } }
+
+    func reload() {
+        let fm = FileManager.default
+        var out: [Pet] = []
+        for sub in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
+            let sheet = sub.appendingPathComponent("spritesheet.webp")
+            guard fm.fileExists(atPath: sheet.path), let frames = Self.slice(sheet) else { continue }
+            var name = sub.lastPathComponent
+            if let d = try? Data(contentsOf: sub.appendingPathComponent("meta.json")),
+               let obj = try? JSONSerialization.jsonObject(with: d) as? [String: String],
+               let n = obj["name"] { name = n }
+            out.append(Pet(id: sub.lastPathComponent, name: name, frames: frames))
+        }
+        pets = out.sorted { $0.name < $1.name }
+    }
+
+    /// Accepts any URL/text containing "pets/<id>" (e.g. codex-pets.net/#/pets/totoro),
+    /// fetches the pet via the site's API and installs its spritesheet.
+    func install(from link: String) async throws -> Pet {
+        guard let r = link.range(of: "pets/([A-Za-z0-9_-]+)", options: .regularExpression) else {
+            throw InstallError(message: "Link không đúng dạng codex-pets.net/#/pets/<id>")
+        }
+        let id = String(link[r].dropFirst("pets/".count))
+        guard let api = URL(string: "https://codex-pets.net/api/pets/\(id)") else {
+            throw InstallError(message: "Pet id không hợp lệ")
+        }
+        let (data, _) = try await URLSession.shared.data(from: api)
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let petObj = obj["pet"] as? [String: Any],
+              let sheetStr = petObj["spritesheetUrl"] as? String,
+              let sheetURL = URL(string: sheetStr) else {
+            throw InstallError(message: "Không tìm thấy pet \"\(id)\" trên codex-pets.net")
+        }
+        let (sheet, _) = try await URLSession.shared.data(from: sheetURL)
+
+        let petDir = dir.appendingPathComponent(id, isDirectory: true)
+        try FileManager.default.createDirectory(at: petDir, withIntermediateDirectories: true)
+        try sheet.write(to: petDir.appendingPathComponent("spritesheet.webp"))
+        let name = (petObj["displayName"] as? String) ?? id
+        try JSONSerialization.data(withJSONObject: ["id": id, "name": name])
+            .write(to: petDir.appendingPathComponent("meta.json"))
+
+        reload()
+        guard let pet = pet(id: id) else {
+            throw InstallError(message: "Spritesheet không đúng chuẩn 192×208 của codex-pets")
+        }
+        return pet
+    }
+
+    /// Standard codex-pets atlas: 8×9 grid of 192×208 cells. Rows used:
+    /// idle=0(6f), jumping=4(5f)→done, failed=5(8f)→error, waiting=6(6f), review=8(6f)→working.
+    private static func slice(_ url: URL) -> [DinoState: [NSImage]]? {
+        guard let img = NSImage(contentsOf: url),
+              let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              cg.width >= 1536, cg.height >= 1872 else { return nil }
+        let cw = 192, ch = 208
+        let rows: [(DinoState, Int, Int)] = [(.idle, 0, 6), (.done, 4, 5), (.error, 5, 8),
+                                             (.waiting, 6, 6), (.working, 8, 6)]
+        var out: [DinoState: [NSImage]] = [:]
+        for (state, row, count) in rows {
+            var frames: [NSImage] = []
+            for i in 0..<count {
+                let rect = CGRect(x: i * cw, y: row * ch, width: cw, height: ch)
+                if let c = cg.cropping(to: rect) {
+                    frames.append(NSImage(cgImage: c, size: NSSize(width: cw, height: ch)))
+                }
+            }
+            if !frames.isEmpty { out[state] = frames }
+        }
+        return out[.idle] != nil ? out : nil
+    }
+}
+
+/// Sprite images, resolved once at launch.
+/// Lookup order per file: env override → app bundle Resources → next to the
+/// executable. Falls back to the 🦖 emoji when nothing exists.
 enum Sprite {
-    static let image: NSImage? = find(envKey: "DINO_IMAGE", fileName: "dino.png")
+    static let capyIdle    = find(envKey: "DINO_IMAGE", fileNames: ["dino.png"])
+    static let capyWorking = find(envKey: "DINO_WORKING_IMAGE", fileNames: ["dino-working.gif"])
 
-    /// Animated sprite shown while Claude is working (GIF, played via NSImageView).
-    static let workingImage: NSImage? = find(envKey: "DINO_WORKING_IMAGE",
-                                             fileName: "dino-working.gif")
+    static let maomaoIdle    = find(fileNames: ["maomao-idle.gif", "maomao/maomao-kusuriya-idle.gif"])
+    static let maomaoWorking = find(fileNames: ["maomao-review.gif", "maomao/maomao-kusuriya-review.gif"])
+    static let maomaoDone    = find(fileNames: ["maomao-jumping.gif", "maomao/maomao-kusuriya-jumping.gif"])
 
-    private static func find(envKey: String, fileName: String) -> NSImage? {
+    static let frierenIdle    = find(fileNames: ["frieren-idle.gif", "frieren/frieren-idle.gif"])
+    static let frierenWorking = find(fileNames: ["frieren-review.gif", "frieren/frieren-review.gif"])
+    static let frierenDone    = find(fileNames: ["frieren-jumping.gif", "frieren/frieren-jumping.gif"])
+    static let frierenWaiting = find(fileNames: ["frieren-waiting.gif", "frieren/frieren-waiting.gif"])
+    static let frierenError   = find(fileNames: ["frieren-failed.gif", "frieren/frieren-failed.gif"])
+
+    static let nezukoIdle    = find(fileNames: ["nezuko-idle.gif", "nezuko/nezuko-idle.gif"])
+    static let nezukoWorking = find(fileNames: ["nezuko-running.gif", "nezuko/nezuko-running.gif"])
+    static let nezukoDone    = find(fileNames: ["nezuko-jumping.gif", "nezuko/nezuko-jumping.gif"])
+    static let nezukoWaiting = find(fileNames: ["nezuko-waiting.gif", "nezuko/nezuko-waiting.gif"])
+    static let nezukoError   = find(fileNames: ["nezuko-failed.gif", "nezuko/nezuko-failed.gif"])
+
+    /// Sprite for a skin id (built-in Skin rawValue or downloaded pet id) + state.
+    static func asset(skinID: String, state: DinoState) -> SpriteAsset? {
+        if let pet = PetLibrary.shared.pet(id: skinID) {
+            if let f = pet.frames[state] ?? pet.frames[.idle], !f.isEmpty { return .frames(f) }
+            return asset(skinID: Skin.capy.rawValue, state: state)
+        }
+        switch Skin(rawValue: skinID) ?? .capy {
+        case .capy:
+            if state == .working, let g = capyWorking { return .gif(g) }
+            if let i = capyIdle { return .still(i) }
+            return nil
+        case .maomao:
+            let gif: NSImage?
+            switch state {
+            case .working: gif = maomaoWorking ?? maomaoIdle
+            case .done:    gif = maomaoDone ?? maomaoIdle
+            default:       gif = maomaoIdle
+            }
+            if let g = gif { return .gif(g) }
+            return asset(skinID: Skin.capy.rawValue, state: state)
+        case .frieren:
+            let gif: NSImage?
+            switch state {
+            case .working: gif = frierenWorking ?? frierenIdle
+            case .done:    gif = frierenDone ?? frierenIdle
+            case .waiting: gif = frierenWaiting ?? frierenIdle
+            case .error:   gif = frierenError ?? frierenIdle
+            case .idle:    gif = frierenIdle
+            }
+            if let g = gif { return .gif(g) }
+            return asset(skinID: Skin.capy.rawValue, state: state)
+        case .nezuko:
+            let gif: NSImage?
+            switch state {
+            case .working: gif = nezukoWorking ?? nezukoIdle
+            case .done:    gif = nezukoDone ?? nezukoIdle
+            case .waiting: gif = nezukoWaiting ?? nezukoIdle
+            case .error:   gif = nezukoError ?? nezukoIdle
+            case .idle:    gif = nezukoIdle
+            }
+            if let g = gif { return .gif(g) }
+            return asset(skinID: Skin.capy.rawValue, state: state)
+        }
+    }
+
+    /// Small copy for the menu bar (status items want ~18 pt).
+    static func statusIcon(for skinID: String) -> NSImage? {
+        guard let img = asset(skinID: skinID, state: .idle)?.previewImage,
+              let copy = img.copy() as? NSImage else { return nil }
+        copy.size = NSSize(width: 18, height: 18)
+        return copy
+    }
+
+    private static func find(envKey: String? = nil, fileNames: [String]) -> NSImage? {
         var candidates: [URL] = []
-        if let p = ProcessInfo.processInfo.environment[envKey], !p.isEmpty {
+        if let envKey,
+           let p = ProcessInfo.processInfo.environment[envKey], !p.isEmpty {
             candidates.append(URL(fileURLWithPath: (p as NSString).expandingTildeInPath))
         }
-        if let res = Bundle.main.resourceURL {
-            candidates.append(res.appendingPathComponent(fileName))
+        for name in fileNames {
+            if let res = Bundle.main.resourceURL {
+                candidates.append(res.appendingPathComponent(name))
+            }
+            candidates.append(Bundle.main.bundleURL.deletingLastPathComponent()
+                .appendingPathComponent(name))
         }
-        candidates.append(Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent(fileName))
         for url in candidates {
             if let img = NSImage(contentsOf: url), img.isValid { return img }
         }
         return nil
-    }
-
-    /// Small copy for the menu bar (status items want ~18 pt).
-    static var statusIcon: NSImage? {
-        guard let img = image, let copy = img.copy() as? NSImage else { return nil }
-        copy.size = NSSize(width: 18, height: 18)
-        return copy
     }
 }
 
 // MARK: - Model
 
 final class DinoModel: ObservableObject {
+    /// Built-in Skin rawValue or a downloaded pet id.
+    @Published var skinID: String =
+        UserDefaults.standard.string(forKey: "dino.skin") ?? Skin.capy.rawValue {
+        didSet { UserDefaults.standard.set(skinID, forKey: "dino.skin") }
+    }
+    @Published var spriteSize: CGFloat = {
+        let s = UserDefaults.standard.double(forKey: "dino.size")
+        return s > 0 ? CGFloat(s) : 56
+    }() {
+        didSet { UserDefaults.standard.set(Double(spriteSize), forKey: "dino.size") }
+    }
     @Published var state: DinoState = .idle
     @Published var title: String = "Claude Code"
     @Published var message: String = ""
@@ -134,7 +335,28 @@ struct AnimatedImageView: NSViewRepresentable {
         return v
     }
 
-    func updateNSView(_ v: NSImageView, context: Context) {}
+    func updateNSView(_ v: NSImageView, context: Context) {
+        // State/skin switches swap the GIF — restart animation on the new one.
+        if v.image !== image {
+            v.image = image
+            v.animates = true
+        }
+    }
+}
+
+/// Plays a sliced spritesheet row by stepping frames at ~8 fps.
+struct FrameAnimationView: View {
+    let frames: [NSImage]
+    @State private var idx = 0
+    private let timer = Timer.publish(every: 0.125, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Image(nsImage: frames[min(idx, frames.count - 1)])
+            .resizable()
+            .interpolation(.none)
+            .scaledToFit()
+            .onReceive(timer) { _ in idx = (idx + 1) % frames.count }
+    }
 }
 
 struct DinoOverlay: View {
@@ -180,34 +402,39 @@ struct DinoOverlay: View {
         .shadow(color: .black.opacity(0.28), radius: 14, y: 5)
     }
 
-    private var usingWorkingGif: Bool {
-        model.state == .working && Sprite.workingImage != nil
+    private var currentAsset: SpriteAsset? {
+        Sprite.asset(skinID: model.skinID, state: model.state)
     }
 
     @ViewBuilder
     private var sprite: some View {
-        if usingWorkingGif, let gif = Sprite.workingImage {
-            AnimatedImageView(image: gif)
-                .frame(width: 56, height: 56)
-        } else if let img = Sprite.image {
+        switch currentAsset {
+        case .some(.gif(let img)):
+            AnimatedImageView(image: img)
+                .frame(width: model.spriteSize, height: model.spriteSize)
+        case .some(.still(let img)):
             Image(nsImage: img)
                 .resizable()
                 .interpolation(.high)
                 .scaledToFit()
-                .frame(width: 56, height: 56)
-        } else {
+                .frame(width: model.spriteSize, height: model.spriteSize)
+        case .some(.frames(let arr)):
+            FrameAnimationView(frames: arr)
+                .frame(width: model.spriteSize, height: model.spriteSize)
+                .id(model.state)   // restart the row's animation on state change
+        case .none:
             Text("🦖")
-                .font(.system(size: 50))
+                .font(.system(size: model.spriteSize * 0.9))
         }
     }
 
     private var dino: some View {
         ZStack(alignment: .topTrailing) {
             sprite
-                // GIF animates by itself — no wobble on top of it.
-                .rotationEffect(.degrees(usingWorkingGif ? 0
-                                         : model.state == .working ? (bob ? -7 : 7)
-                                         : (bob ? -2 : 2)),
+                // GIFs/frame sequences animate by themselves — no wobble on top.
+                .rotationEffect(.degrees((currentAsset?.isStill ?? false)
+                                         ? (model.state == .working ? (bob ? -7 : 7) : (bob ? -2 : 2))
+                                         : 0),
                                 anchor: .bottom)
                 .offset(y: bob ? -5 : 0)
                 .animation(
@@ -219,14 +446,15 @@ struct DinoOverlay: View {
 
             if let badge = model.state.badge {
                 Text(badge)
-                    .font(.system(size: 17))
-                    .offset(x: 8, y: -6)
+                    .font(.system(size: max(17, model.spriteSize * 0.3)))
+                    .offset(x: model.spriteSize * 0.14, y: -model.spriteSize * 0.1)
                     .transition(.scale.combined(with: .opacity))
             }
         }
         .opacity(model.state == .idle && !model.bubbleVisible ? 0.35 : 1)
         .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
-        .frame(width: 74, height: 74, alignment: .bottom)
+        .frame(width: model.spriteSize + 18, height: model.spriteSize + 18, alignment: .bottom)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: model.spriteSize)
     }
 }
 
@@ -315,6 +543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.accessory)      // no Dock icon
+        PetLibrary.shared.reload()
         buildPanel()
         buildStatusItem()
 
@@ -371,12 +600,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let icon = Sprite.statusIcon {
+        applyStatusIcon()
+        statusItem.menu = makeMenu()
+    }
+
+    private func applyStatusIcon() {
+        if let icon = Sprite.statusIcon(for: model.skinID) {
             statusItem.button?.image = icon
+            statusItem.button?.title = ""
         } else {
+            statusItem.button?.image = nil
             statusItem.button?.title = "🦖"
         }
+    }
 
+    private func makeMenu() -> NSMenu {
         let menu = NSMenu()
 
         let test = NSMenuItem(title: "Test bubble", action: #selector(testBubble), keyEquivalent: "")
@@ -385,6 +623,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let move = NSMenuItem(title: "Move mode (kéo dino)", action: #selector(toggleMove), keyEquivalent: "")
         move.target = self
+        move.state = moveMode ? .on : .off
         menu.addItem(move)
 
         let posItem = NSMenuItem(title: "Vị trí", action: nil, keyEquivalent: "")
@@ -399,12 +638,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(posItem)
         menu.setSubmenu(pos, for: posItem)
 
+        let skinItem = NSMenuItem(title: "Nhân vật", action: nil, keyEquivalent: "")
+        let skins = NSMenu()
+        var entries: [(id: String, title: String)] = Skin.allCases.map { ($0.rawValue, $0.title) }
+        entries += PetLibrary.shared.pets.map { ($0.id, $0.name) }
+        for (id, title) in entries {
+            let it = NSMenuItem(title: title, action: #selector(setSkin(_:)), keyEquivalent: "")
+            it.representedObject = id
+            it.target = self
+            it.state = (id == model.skinID) ? .on : .off
+            skins.addItem(it)
+        }
+        skins.addItem(.separator())
+        let add = NSMenuItem(title: "Thêm pet từ link…", action: #selector(addPetFromLink), keyEquivalent: "")
+        add.target = self
+        skins.addItem(add)
+        menu.addItem(skinItem)
+        menu.setSubmenu(skins, for: skinItem)
+
+        let sizeItem = NSMenuItem(title: "Kích thước", action: nil, keyEquivalent: "")
+        let sizes = NSMenu()
+        for (name, pts) in [("Nhỏ", 56), ("Vừa", 80), ("Lớn", 110), ("Bự", 150)] {
+            let it = NSMenuItem(title: "\(name) (\(pts)pt)", action: #selector(setSize(_:)), keyEquivalent: "")
+            it.tag = pts
+            it.target = self
+            it.state = (CGFloat(pts) == model.spriteSize) ? .on : .off
+            sizes.addItem(it)
+        }
+        menu.addItem(sizeItem)
+        menu.setSubmenu(sizes, for: sizeItem)
+
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Dino", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
 
-        statusItem.menu = menu
+        return menu
     }
 
     @objc private func testBubble() {
@@ -421,6 +690,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                    message: moveMode ? "Kéo dino tới chỗ bạn muốn, rồi tắt Move mode."
                                      : "Đã khoá lại (click-through).",
                    ttl: 4)
+    }
+
+    @objc private func setSkin(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        model.skinID = id
+        statusItem.menu = makeMenu()
+        applyStatusIcon()
+        // .done doubles as a preview of the skin's "success" sprite.
+        model.push(state: .done, title: "Dino", message: "Đã chuyển sang \(sender.title)!", ttl: 4)
+    }
+
+    @objc private func addPetFromLink() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Thêm pet từ codex-pets.net"
+        alert.informativeText = "Dán link dạng https://codex-pets.net/#/pets/<id>"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "https://codex-pets.net/#/pets/totoro"
+        if let pasted = NSPasteboard.general.string(forType: .string),
+           pasted.contains("codex-pets.net") {
+            field.stringValue = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: "Thêm")
+        alert.addButton(withTitle: "Huỷ")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        installPet(from: field.stringValue)
+    }
+
+    private func installPet(from link: String) {
+        model.push(state: .working, title: "Dino", message: "Đang tải pet…", ttl: 0)
+        Task { @MainActor in
+            do {
+                let pet = try await PetLibrary.shared.install(from: link)
+                model.skinID = pet.id
+                statusItem.menu = makeMenu()
+                applyStatusIcon()
+                model.push(state: .done, title: "Dino", message: "Đã thêm \(pet.name)!", ttl: 5)
+            } catch {
+                model.push(state: .error, title: "Dino",
+                           message: "Lỗi tải pet: \(error.localizedDescription)", ttl: 8)
+            }
+        }
+    }
+
+    @objc private func setSize(_ sender: NSMenuItem) {
+        model.spriteSize = CGFloat(sender.tag)
+        sender.menu?.items.forEach { $0.state = ($0.tag == sender.tag) ? .on : .off }
+        model.push(state: .done, title: "Dino", message: "Kích thước: \(sender.tag)pt", ttl: 3)
     }
 
     @objc private func setCorner(_ sender: NSMenuItem) {
