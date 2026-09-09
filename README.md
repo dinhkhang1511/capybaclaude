@@ -20,6 +20,15 @@ curl -fsSL https://raw.githubusercontent.com/dinhkhang1511/capybaclaude/main/ins
 
 Cài từ branch khác: `... | bash -s -- --branch maomao`.
 
+**Máy không build được (không có Xcode CLT / swiftc lỗi):** thêm `--prebuilt` để
+tải app dựng sẵn (universal Apple Silicon + Intel, macOS 13+), không cần compiler:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dinhkhang1511/capybaclaude/main/install.sh | bash -s -- --prebuilt
+```
+
+(Script cũng tự chuyển sang prebuilt nếu không tìm thấy `swiftc`.)
+
 ### Build từ source
 
 ```bash
