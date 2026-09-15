@@ -321,12 +321,20 @@ final class DinoModel: ObservableObject {
 
 // MARK: - View
 
+/// NSImageView is an NSControl: it swallows mouse-down and reports
+/// mouseDownCanMoveWindow = false, which blocks the panel's
+/// isMovableByWindowBackground drag. Make it transparent to the mouse.
+final class PassthroughImageView: NSImageView {
+    override var mouseDownCanMoveWindow: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// SwiftUI's Image renders only the first frame of a GIF; NSImageView plays it.
 struct AnimatedImageView: NSViewRepresentable {
     let image: NSImage
 
-    func makeNSView(context: Context) -> NSImageView {
-        let v = NSImageView()
+    func makeNSView(context: Context) -> PassthroughImageView {
+        let v = PassthroughImageView()
         v.image = image
         v.animates = true
         v.imageScaling = .scaleProportionallyUpOrDown
@@ -335,7 +343,7 @@ struct AnimatedImageView: NSViewRepresentable {
         return v
     }
 
-    func updateNSView(_ v: NSImageView, context: Context) {
+    func updateNSView(_ v: PassthroughImageView, context: Context) {
         // State/skin switches swap the GIF — restart animation on the new one.
         if v.image !== image {
             v.image = image
