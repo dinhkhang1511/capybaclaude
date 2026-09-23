@@ -64,6 +64,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key> <string>1.0</string>
   <key>LSMinimumSystemVersion</key>  <string>13.0</string>
   <key>LSUIElement</key>             <true/>
+  <!-- Without this key macOS silently denies Apple Events, so the
+       now-playing lookup (Spotify / Music / a YouTube tab) never works. -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Dino đọc tên bài hát đang phát để hiện lên bong bóng cạnh con pet.</string>
 </dict>
 </plist>
 PLIST

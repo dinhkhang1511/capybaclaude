@@ -4,6 +4,8 @@
 import AppKit
 import SwiftUI
 import Network
+import CoreAudio
+import ApplicationServices
 
 // MARK: - State
 
@@ -78,6 +80,8 @@ struct Pet {
     let id: String
     let name: String
     let frames: [DinoState: [NSImage]]
+    /// "Waving" row — played while music is on.
+    let dance: [NSImage]?
 }
 
 /// Manages downloaded pets: ~/Library/Application Support/Dino/pets/<id>/
@@ -103,12 +107,13 @@ final class PetLibrary {
         var out: [Pet] = []
         for sub in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
             let sheet = sub.appendingPathComponent("spritesheet.webp")
-            guard fm.fileExists(atPath: sheet.path), let frames = Self.slice(sheet) else { continue }
+            guard fm.fileExists(atPath: sheet.path), let sliced = Self.slice(sheet) else { continue }
             var name = sub.lastPathComponent
             if let d = try? Data(contentsOf: sub.appendingPathComponent("meta.json")),
                let obj = try? JSONSerialization.jsonObject(with: d) as? [String: String],
                let n = obj["name"] { name = n }
-            out.append(Pet(id: sub.lastPathComponent, name: name, frames: frames))
+            out.append(Pet(id: sub.lastPathComponent, name: name,
+                           frames: sliced.frames, dance: sliced.dance))
         }
         pets = out.sorted { $0.name < $1.name }
     }
@@ -147,26 +152,35 @@ final class PetLibrary {
     }
 
     /// Standard codex-pets atlas: 8×9 grid of 192×208 cells. Rows used:
-    /// idle=0(6f), jumping=4(5f)→done, failed=5(8f)→error, waiting=6(6f), review=8(6f)→working.
-    private static func slice(_ url: URL) -> [DinoState: [NSImage]]? {
+    /// idle=0(6f), waving=3(4f)→dance, jumping=4(5f)→done, failed=5(8f)→error,
+    /// waiting=6(6f), review=8(6f)→working.
+    private static func slice(_ url: URL) -> (frames: [DinoState: [NSImage]], dance: [NSImage]?)? {
         guard let img = NSImage(contentsOf: url),
               let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil),
               cg.width >= 1536, cg.height >= 1872 else { return nil }
         let cw = 192, ch = 208
-        let rows: [(DinoState, Int, Int)] = [(.idle, 0, 6), (.done, 4, 5), (.error, 5, 8),
-                                             (.waiting, 6, 6), (.working, 8, 6)]
-        var out: [DinoState: [NSImage]] = [:]
-        for (state, row, count) in rows {
+
+        func row(_ index: Int, _ count: Int) -> [NSImage] {
             var frames: [NSImage] = []
             for i in 0..<count {
-                let rect = CGRect(x: i * cw, y: row * ch, width: cw, height: ch)
+                let rect = CGRect(x: i * cw, y: index * ch, width: cw, height: ch)
                 if let c = cg.cropping(to: rect) {
                     frames.append(NSImage(cgImage: c, size: NSSize(width: cw, height: ch)))
                 }
             }
+            return frames
+        }
+
+        let rows: [(DinoState, Int, Int)] = [(.idle, 0, 6), (.done, 4, 5), (.error, 5, 8),
+                                             (.waiting, 6, 6), (.working, 8, 6)]
+        var out: [DinoState: [NSImage]] = [:]
+        for (state, index, count) in rows {
+            let frames = row(index, count)
             if !frames.isEmpty { out[state] = frames }
         }
-        return out[.idle] != nil ? out : nil
+        guard out[.idle] != nil else { return nil }
+        let dance = row(3, 4)
+        return (out, dance.isEmpty ? nil : dance)
     }
 }
 
@@ -238,6 +252,24 @@ enum Sprite {
         }
     }
 
+    /// Sprite played while music is on: the "waving" row for downloaded pets,
+    /// the bounciest GIF each built-in skin has.
+    static func danceAsset(skinID: String) -> SpriteAsset? {
+        if let pet = PetLibrary.shared.pet(id: skinID) {
+            if let d = pet.dance, !d.isEmpty { return .frames(d) }
+            return asset(skinID: skinID, state: .done)
+        }
+        let gif: NSImage?
+        switch Skin(rawValue: skinID) ?? .capy {
+        case .capy:    gif = capyWorking
+        case .maomao:  gif = maomaoDone
+        case .frieren: gif = frierenDone
+        case .nezuko:  gif = nezukoDone
+        }
+        if let g = gif { return .gif(g) }
+        return asset(skinID: skinID, state: .idle)
+    }
+
     /// Small copy for the menu bar (status items want ~18 pt).
     static func statusIcon(for skinID: String) -> NSImage? {
         guard let img = asset(skinID: skinID, state: .idle)?.previewImage,
@@ -266,6 +298,179 @@ enum Sprite {
     }
 }
 
+// MARK: - Music
+
+/// System-wide media keys. macOS requires Accessibility permission to post
+/// these; without it the events are silently dropped.
+enum MediaKey {
+    static let play: Int32 = 16      // NX_KEYTYPE_PLAY
+    static let next: Int32 = 17      // NX_KEYTYPE_NEXT
+    static let previous: Int32 = 18  // NX_KEYTYPE_PREVIOUS
+
+    static var trusted: Bool { AXIsProcessTrusted() }
+
+    @discardableResult
+    static func requestTrust() -> Bool {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        return AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+    }
+
+    static func post(_ key: Int32) {
+        for down in [true, false] {
+            let raw = down ? 0xA00 : 0xB00
+            guard let ev = NSEvent.otherEvent(with: .systemDefined,
+                                              location: .zero,
+                                              modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(raw)),
+                                              timestamp: 0, windowNumber: 0, context: nil,
+                                              subtype: 8,
+                                              data1: Int((key << 16) | Int32(raw)),
+                                              data2: -1) else { continue }
+            ev.cgEvent?.post(tap: .cghidEventTap)
+        }
+    }
+}
+
+/// Watches what's playing: CoreAudio tells us *whether* sound is coming out
+/// (no permission needed, works for any app), AppleScript tells us *what*
+/// (Spotify / Music / a YouTube tab in Chrome — needs Automation permission).
+///
+/// MediaRemote — the real system-wide now-playing API — is entitlement-gated
+/// since macOS 15.4 and returns nothing to unsigned apps, hence this split.
+final class NowPlayingMonitor {
+    /// (isPlaying, "Title — Artist")
+    var onUpdate: ((Bool, String?) -> Void)?
+
+    private var timer: Timer?
+    private let queue = DispatchQueue(label: "dino.nowplaying")
+    private var lastTrackPoll = Date.distantPast
+    private var lastTrack: String?
+
+    func start() {
+        stop()
+        let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+        t.tolerance = 0.3
+        timer = t
+        poll()
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        lastTrack = nil
+        onUpdate?(false, nil)
+    }
+
+    private func poll() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let playing = Self.audioIsRunning()
+            // AppleScript is comparatively expensive — only while sound plays,
+            // and at most every 5s.
+            if playing, Date().timeIntervalSince(self.lastTrackPoll) > 5 {
+                self.lastTrackPoll = Date()
+                self.lastTrack = Self.currentTrack()
+            } else if !playing {
+                self.lastTrack = nil
+            }
+            let track = self.lastTrack
+            DispatchQueue.main.async { self.onUpdate?(playing, track) }
+        }
+    }
+
+    /// True when the default output device is actively rendering audio.
+    private static func audioIsRunning() -> Bool {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var dev = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
+                                         &addr, 0, nil, &size, &dev) == noErr else { return false }
+        var running = UInt32(0)
+        var rAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                                               mScope: kAudioObjectPropertyScopeGlobal,
+                                               mElement: kAudioObjectPropertyElementMain)
+        size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(dev, &rAddr, 0, nil, &size, &running) == noErr else { return false }
+        return running != 0
+    }
+
+    /// AppleScript resolves an app's vocabulary at *compile* time, so a script
+    /// mentioning an app that isn't installed fails to parse — and would take
+    /// every other player down with it. Hence one script per player, compiled
+    /// only when that app actually exists. Each guards on "is running" so we
+    /// never launch a player just to ask what it's doing.
+    private struct Player {
+        let bundleID: String
+        let source: String
+    }
+
+    private static let players: [Player] = [
+        Player(bundleID: "com.spotify.client", source: """
+        if application "Spotify" is running then
+            tell application "Spotify"
+                if player state is playing then
+                    return (name of current track) & " — " & (artist of current track)
+                end if
+            end tell
+        end if
+        return ""
+        """),
+        Player(bundleID: "com.apple.Music", source: """
+        if application "Music" is running then
+            tell application "Music"
+                if player state is playing then
+                    return (name of current track) & " — " & (artist of current track)
+                end if
+            end tell
+        end if
+        return ""
+        """),
+        Player(bundleID: "com.google.Chrome", source: """
+        if application "Google Chrome" is running then
+            tell application "Google Chrome"
+                try
+                    set t to title of active tab of window 1
+                    if t ends with " - YouTube" then return text 1 thru -11 of t
+                end try
+                repeat with w in windows
+                    repeat with tb in tabs of w
+                        set t to title of tb
+                        if t ends with " - YouTube" then return text 1 thru -11 of t
+                    end repeat
+                end repeat
+            end tell
+        end if
+        return ""
+        """),
+    ]
+
+    private static let installedPlayers: [Player] = players.filter {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0.bundleID) != nil
+    }
+
+    /// Runs on `queue`; each NSAppleScript is created fresh per call and never
+    /// touched from two threads at once.
+    private static func currentTrack() -> String? {
+        for p in installedPlayers {
+            guard let s = NSAppleScript(source: p.source) else { continue }
+            var err: NSDictionary?
+            let out = s.executeAndReturnError(&err).stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let err {
+                NSLog("dino: now-playing (\(p.bundleID)) failed: \(err)")
+                continue
+            }
+            if let out, !out.isEmpty {
+                return out.count > 90 ? String(out.prefix(90)) + "…" : out
+            }
+        }
+        return nil
+    }
+}
+
 // MARK: - Model
 
 final class DinoModel: ObservableObject {
@@ -285,7 +490,37 @@ final class DinoModel: ObservableObject {
     @Published var message: String = ""
     @Published var bubbleVisible: Bool = false
 
+    @Published var musicEnabled: Bool =
+        UserDefaults.standard.object(forKey: "dino.music") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(musicEnabled, forKey: "dino.music") }
+    }
+    @Published var musicPlaying: Bool = false
+    @Published var nowPlaying: String?
+    @Published var moveMode: Bool = false
+
+    /// The pet dances only while Claude itself has nothing to say.
+    var isDancing: Bool { musicEnabled && musicPlaying && state == .idle }
+
     private var hideWork: DispatchWorkItem?
+
+    /// Announces a track — never on top of a live Claude message.
+    func pushMusic(_ track: String) {
+        DispatchQueue.main.async {
+            guard self.state == .idle else { return }
+            self.hideWork?.cancel()
+            self.title = "🎵 Đang phát"
+            self.message = track
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
+                self.bubbleVisible = true
+            }
+            let w = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                withAnimation(.easeOut(duration: 0.25)) { self.bubbleVisible = false }
+            }
+            self.hideWork = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: w)
+        }
+    }
 
     /// ttl == 0 means "stay until the next event"
     func push(state: DinoState, title: String, message: String, ttl: TimeInterval) {
@@ -329,6 +564,37 @@ final class PassthroughImageView: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+/// Transparent hit area over the sprite: click = play/pause, scroll = skip.
+/// Goes inert in Move mode so the window drag keeps working.
+final class PetInteractionNSView: NSView {
+    var onClick: () -> Void = {}
+    var onScroll: (CGFloat) -> Void = { _ in }
+    var active = true
+
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func hitTest(_ point: NSPoint) -> NSView? { active ? super.hitTest(point) : nil }
+    override func mouseDown(with event: NSEvent) { onClick() }
+    override func scrollWheel(with event: NSEvent) { onScroll(event.scrollingDeltaY) }
+}
+
+struct PetInteractionView: NSViewRepresentable {
+    let active: Bool
+    let onClick: () -> Void
+    let onScroll: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> PetInteractionNSView {
+        let v = PetInteractionNSView()
+        updateNSView(v, context: context)
+        return v
+    }
+
+    func updateNSView(_ v: PetInteractionNSView, context: Context) {
+        v.active = active
+        v.onClick = onClick
+        v.onScroll = onScroll
+    }
+}
+
 /// SwiftUI's Image renders only the first frame of a GIF; NSImageView plays it.
 struct AnimatedImageView: NSViewRepresentable {
     let image: NSImage
@@ -369,6 +635,8 @@ struct FrameAnimationView: View {
 
 struct DinoOverlay: View {
     @ObservedObject var model: DinoModel
+    var onPetClick: () -> Void = {}
+    var onPetScroll: (CGFloat) -> Void = { _ in }
     @State private var bob = false
 
     var body: some View {
@@ -411,7 +679,8 @@ struct DinoOverlay: View {
     }
 
     private var currentAsset: SpriteAsset? {
-        Sprite.asset(skinID: model.skinID, state: model.state)
+        model.isDancing ? Sprite.danceAsset(skinID: model.skinID)
+                        : Sprite.asset(skinID: model.skinID, state: model.state)
     }
 
     @ViewBuilder
@@ -429,7 +698,8 @@ struct DinoOverlay: View {
         case .some(.frames(let arr)):
             FrameAnimationView(frames: arr)
                 .frame(width: model.spriteSize, height: model.spriteSize)
-                .id(model.state)   // restart the row's animation on state change
+                // restart the row's animation whenever the row changes
+                .id("\(model.state.rawValue)-\(model.isDancing)")
         case .none:
             Text("🦖")
                 .font(.system(size: model.spriteSize * 0.9))
@@ -459,10 +729,13 @@ struct DinoOverlay: View {
                     .transition(.scale.combined(with: .opacity))
             }
         }
-        .opacity(model.state == .idle && !model.bubbleVisible ? 0.35 : 1)
+        .opacity(model.state == .idle && !model.bubbleVisible && !model.isDancing ? 0.35 : 1)
         .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
         .frame(width: model.spriteSize + 18, height: model.spriteSize + 18, alignment: .bottom)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: model.spriteSize)
+        .overlay(PetInteractionView(active: !model.moveMode,
+                                    onClick: onPetClick,
+                                    onScroll: onPetScroll))
     }
 }
 
@@ -548,12 +821,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var server: HookServer!
     private var moveMode = false
+    private let music = NowPlayingMonitor()
+    private var hoverTimer: Timer?
+    private var scrollAccum: CGFloat = 0
+    private var lastSkip = Date.distantPast
+    private var askedForTrust = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.accessory)      // no Dock icon
         PetLibrary.shared.reload()
         buildPanel()
         buildStatusItem()
+        startMusicMonitor()
+        startHoverTracking()
 
         let port = UInt16(ProcessInfo.processInfo.environment["DINO_PORT"] ?? "") ?? 7654
         server = HookServer { [weak self] payload in self?.handle(payload) }
@@ -580,7 +860,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.worksWhenModal = true
         p.isMovableByWindowBackground = true
         p.ignoresMouseEvents = true                // click-through by default
-        p.contentView = NSHostingView(rootView: DinoOverlay(model: model))
+        p.contentView = NSHostingView(rootView: DinoOverlay(
+            model: model,
+            onPetClick: { [weak self] in self?.petClicked() },
+            onPetScroll: { [weak self] dy in self?.petScrolled(dy) }))
         panel = p
         applyPosition()
         p.orderFrontRegardless()
@@ -602,6 +885,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             x: left ? v.minX + m : v.maxX - s.width - m,
             y: top  ? v.maxY - s.height - m : v.minY + m
         ))
+    }
+
+    // MARK: music
+
+    private func startMusicMonitor() {
+        music.onUpdate = { [weak self] playing, track in
+            guard let self else { return }
+            // Announce on a new track, and again when sound resumes after silence.
+            let resumed = playing && !self.model.musicPlaying
+            let changed = self.model.nowPlaying != track
+            self.model.musicPlaying = playing
+            self.model.nowPlaying = track
+            if let track, playing, self.model.musicEnabled, changed || resumed {
+                self.model.pushMusic(track)
+            }
+        }
+        if model.musicEnabled { music.start() }
+    }
+
+    /// The panel stays click-through except while the cursor sits on the pet,
+    /// so the music controls never swallow a click meant for the app below.
+    private func startHoverTracking() {
+        let t = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+            guard let self, let panel = self.panel, !self.moveMode else { return }
+            let over = self.petScreenRect().contains(NSEvent.mouseLocation)
+            if panel.ignoresMouseEvents == over { panel.ignoresMouseEvents = !over }
+        }
+        t.tolerance = 0.05
+        hoverTimer = t
+    }
+
+    /// Where the sprite sits on screen — bottom-trailing of the panel, matching
+    /// DinoOverlay's 14pt padding and spriteSize + 18 box.
+    private func petScreenRect() -> NSRect {
+        let f = panel.frame
+        let box = model.spriteSize + 18
+        let pad: CGFloat = 14
+        return NSRect(x: f.maxX - pad - box, y: f.minY + pad, width: box, height: box)
+    }
+
+    private func petClicked() {
+        guard ensureMediaTrust() else { return }
+        MediaKey.post(MediaKey.play)
+    }
+
+    private func petScrolled(_ dy: CGFloat) {
+        scrollAccum += dy
+        guard abs(scrollAccum) > 12, Date().timeIntervalSince(lastSkip) > 0.6 else { return }
+        let up = scrollAccum > 0
+        scrollAccum = 0
+        lastSkip = Date()
+        guard ensureMediaTrust() else { return }
+        MediaKey.post(up ? MediaKey.next : MediaKey.previous)
+        model.push(state: .idle, title: "🎵 Dino",
+                   message: up ? "Bài kế tiếp ⏭" : "Bài trước ⏮", ttl: 2)
+    }
+
+    /// Posting media keys needs Accessibility — ask once, then point at the
+    /// exact System Settings pane instead of failing silently.
+    private func ensureMediaTrust() -> Bool {
+        if MediaKey.trusted { return true }
+        // Ask (and open System Settings) at most once per launch — nagging on
+        // every click would be worse than doing nothing.
+        if !askedForTrust {
+            askedForTrust = true
+            MediaKey.requestTrust()
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+        model.push(state: .waiting, title: "Dino",
+                   message: "Cần quyền Accessibility để điều khiển nhạc — bật Dino trong "
+                          + "System Settings → Privacy & Security → Accessibility.",
+                   ttl: 14)
+        return false
     }
 
     // MARK: menu bar
@@ -633,6 +991,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         move.target = self
         move.state = moveMode ? .on : .off
         menu.addItem(move)
+
+        let musicItem = NSMenuItem(title: "🎵 Theo nhạc đang phát",
+                                   action: #selector(toggleMusic(_:)), keyEquivalent: "")
+        musicItem.target = self
+        musicItem.state = model.musicEnabled ? .on : .off
+        menu.addItem(musicItem)
 
         let posItem = NSMenuItem(title: "Vị trí", action: nil, keyEquivalent: "")
         let pos = NSMenu()
@@ -691,6 +1055,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleMove(_ sender: NSMenuItem) {
         moveMode.toggle()
+        model.moveMode = moveMode
         sender.state = moveMode ? .on : .off
         panel.ignoresMouseEvents = !moveMode
         model.push(state: .idle,
@@ -742,6 +1107,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                            message: "Lỗi tải pet: \(error.localizedDescription)", ttl: 8)
             }
         }
+    }
+
+    @objc private func toggleMusic(_ sender: NSMenuItem) {
+        model.musicEnabled.toggle()
+        sender.state = model.musicEnabled ? .on : .off
+        if model.musicEnabled { music.start() } else { music.stop() }
+        model.push(state: .done, title: "Dino",
+                   message: model.musicEnabled
+                       ? "Pet sẽ nhảy theo nhạc. Click vào pet = play/pause, cuộn = đổi bài."
+                       : "Đã tắt chế độ theo nhạc.",
+                   ttl: 5)
     }
 
     @objc private func setSize(_ sender: NSMenuItem) {
