@@ -119,12 +119,41 @@ System Settings → General → Login Items → `+` → `~/Applications/Dino.app
 | Đổi port | env `DINO_PORT=9000` khi launch |
 | Đổi sprite | Đặt file `dino.png` cạnh `main.swift` rồi `./build.sh` (hoặc set env `DINO_IMAGE=/path/to/img.png`). Không có file → fallback về emoji 🦖 |
 | Sprite khi đang chạy | Đặt GIF `dino-working.gif` cạnh `main.swift` (hoặc env `DINO_WORKING_IMAGE`) — tự play khi state = working, hết working thì về `dino.png` |
+| Theo nhạc đang phát | Menu bar → **🎵 Theo nhạc đang phát** (mặc định bật). Pet nhảy khi có tiếng, hiện bubble tên bài khi đổi bài, **click vào pet** = play/pause, **cuộn trên pet** = bài kế/bài trước. Xem mục 7 về quyền |
 | Thêm pet mới | Menu bar → **Nhân vật** → **Thêm pet từ link…** → dán link `codex-pets.net/#/pets/<id>` (tự prefill nếu link đang ở clipboard). App tải spritesheet về `~/Library/Application Support/Dino/pets/<id>/`, cắt frame và chuyển sang pet mới luôn — không cần rebuild |
 | Zoom sprite | Menu bar → **Kích thước** → Nhỏ 56 / Vừa 80 / Lớn 110 / Bự 150pt (lưu vào UserDefaults) |
 | Đổi nhân vật | Menu bar → **Nhân vật** → Capybara / MaoMao / Frieren / Nezuko (lưu vào UserDefaults). MaoMao: idle / review (working) / jumping (done) từ `maomao/*.gif`. Frieren & Nezuko: thêm cả waiting + failed (error) — cắt từ spritesheet của [codex-pets.net](https://codex-pets.net) ([frieren](https://codex-pets.net/#/pets/frieren) by rudoduro, [nezu](https://codex-pets.net/#/pets/nezu) by dc); Nezuko dùng row "running" (gõ laptop) khi working |
 | Đổi âm thanh | `DinoState.systemSound` — tên file trong `/System/Library/Sounds` |
 | Cắt message ngắn hơn | `AppDelegate.clean()`, hằng `240` |
 | Luôn ẩn dino khi idle | `DinoOverlay.dino` → `.opacity(... ? 0 : 1)` |
+
+## 7. Chế độ theo nhạc 🎵
+
+Pet nhảy theo nhạc đang phát, hiện tên bài, và làm remote điều khiển.
+
+| Tính năng | Cơ chế | Quyền cần |
+|---|---|---|
+| Nhảy khi có nhạc | CoreAudio (`kAudioDevicePropertyDeviceIsRunningSomewhere`) | **Không cần** — nhận mọi nguồn tiếng (Chrome, YouTube, game…) |
+| Bubble tên bài | AppleScript hỏi Spotify / Music / tab YouTube của Chrome | Automation (macOS tự hỏi lần đầu) |
+| Click = play/pause, cuộn = đổi bài | Media key toàn hệ thống (`NX_KEYTYPE_PLAY/NEXT/PREVIOUS`) | **Accessibility** |
+
+Vài lưu ý:
+
+- **MediaRemote không dùng được.** API "now playing" toàn hệ thống của Apple bị khoá
+  sau entitlement từ macOS 15.4, app tự build gọi vào chỉ nhận kết quả rỗng — nên phải
+  tách đôi: CoreAudio biết *có đang phát không*, AppleScript biết *đang phát cái gì*.
+- **Trạng thái Claude luôn thắng.** Pet chỉ nhảy khi Claude đang rảnh (idle); lúc đang
+  chạy / chờ xác nhận / lỗi thì sprite theo trạng thái Claude như cũ.
+- **Click-through vẫn giữ.** Panel chỉ nhận chuột khi con trỏ nằm đúng trên pet, nên
+  không bao giờ chắn click của bạn.
+- Với Chrome, app tìm tab có tiêu đề kết thúc bằng `- YouTube` (ưu tiên tab đang mở).
+  Mở nhiều tab YouTube cùng lúc thì tên bài có thể không khớp tab đang kêu.
+- **Quyền bị hỏi lại sau mỗi lần build lại:** `build.sh` ký ad-hoc (`codesign --sign -`),
+  mỗi lần build ra chữ ký mới → macOS coi như app khác → quyền Accessibility cũ hết
+  hiệu lực (dòng cũ trong danh sách vẫn hiện tick nhưng **không còn tác dụng**). Cách xử
+  lý: vào System Settings → Privacy & Security → Accessibility, **xoá hết dòng Dino cũ
+  bằng nút `–`**, rồi click vào pet để cấp lại. Bản prebuilt (`dist/Dino.app.zip`) giữ
+  nguyên binary nên cấp một lần là xong.
 
 ## Hạn chế đã biết
 
