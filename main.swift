@@ -564,16 +564,25 @@ final class PassthroughImageView: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-/// Transparent hit area over the sprite: click = play/pause, scroll = skip.
-/// Goes inert in Move mode so the window drag keeps working.
+/// Transparent hit area over the sprite: click = play/pause, scroll = skip,
+/// right-click (or ctrl-click) = the menu.
+/// Goes inert in Move mode so the window drag keeps working — the panel picks
+/// up right-clicks in that case, so the menu stays reachable either way.
 final class PetInteractionNSView: NSView {
     var onClick: () -> Void = {}
     var onScroll: (CGFloat) -> Void = { _ in }
+    var onRightClick: (NSEvent) -> Void = { _ in }
     var active = true
 
     override var mouseDownCanMoveWindow: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { active ? super.hitTest(point) : nil }
-    override func mouseDown(with event: NSEvent) { onClick() }
+
+    override func mouseDown(with event: NSEvent) {
+        // Ctrl-click is a right-click on macOS; AppKit does not synthesise one.
+        if event.modifierFlags.contains(.control) { onRightClick(event) } else { onClick() }
+    }
+
+    override func rightMouseDown(with event: NSEvent) { onRightClick(event) }
     override func scrollWheel(with event: NSEvent) { onScroll(event.scrollingDeltaY) }
 }
 
@@ -581,6 +590,7 @@ struct PetInteractionView: NSViewRepresentable {
     let active: Bool
     let onClick: () -> Void
     let onScroll: (CGFloat) -> Void
+    let onRightClick: (NSEvent) -> Void
 
     func makeNSView(context: Context) -> PetInteractionNSView {
         let v = PetInteractionNSView()
@@ -592,7 +602,15 @@ struct PetInteractionView: NSViewRepresentable {
         v.active = active
         v.onClick = onClick
         v.onScroll = onScroll
+        v.onRightClick = onRightClick
     }
+}
+
+/// Panel that forwards right-clicks anywhere on itself to the menu. Needed for
+/// Move mode, where the pet hit area is inert and the drag owns the left button.
+final class DinoPanel: NSPanel {
+    var onRightClick: ((NSEvent) -> Void)?
+    override func rightMouseDown(with event: NSEvent) { onRightClick?(event) }
 }
 
 /// SwiftUI's Image renders only the first frame of a GIF; NSImageView plays it.
@@ -637,6 +655,7 @@ struct DinoOverlay: View {
     @ObservedObject var model: DinoModel
     var onPetClick: () -> Void = {}
     var onPetScroll: (CGFloat) -> Void = { _ in }
+    var onPetRightClick: (NSEvent) -> Void = { _ in }
     @State private var bob = false
 
     var body: some View {
@@ -735,7 +754,8 @@ struct DinoOverlay: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: model.spriteSize)
         .overlay(PetInteractionView(active: !model.moveMode,
                                     onClick: onPetClick,
-                                    onScroll: onPetScroll))
+                                    onScroll: onPetScroll,
+                                    onRightClick: onPetRightClick))
     }
 }
 
@@ -817,8 +837,9 @@ final class HookServer {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = DinoModel()
-    private var panel: NSPanel!
+    private var panel: DinoPanel!
     private var statusItem: NSStatusItem!
+    private var menuOpen = false
     private var server: HookServer!
     private var moveMode = false
     private let music = NowPlayingMonitor()
@@ -846,10 +867,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildPanel() {
         let size = NSSize(width: 470, height: 190)
-        let p = NSPanel(contentRect: NSRect(origin: .zero, size: size),
-                        styleMask: [.borderless, .nonactivatingPanel],
-                        backing: .buffered,
-                        defer: false)
+        let p = DinoPanel(contentRect: NSRect(origin: .zero, size: size),
+                          styleMask: [.borderless, .nonactivatingPanel],
+                          backing: .buffered,
+                          defer: false)
         p.isFloatingPanel = true
         p.level = .screenSaver                     // above full-screen Chrome etc.
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
@@ -863,7 +884,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.contentView = NSHostingView(rootView: DinoOverlay(
             model: model,
             onPetClick: { [weak self] in self?.petClicked() },
-            onPetScroll: { [weak self] dy in self?.petScrolled(dy) }))
+            onPetScroll: { [weak self] dy in self?.petScrolled(dy) },
+            onPetRightClick: { [weak self] e in self?.showPetMenu(e) }))
+        p.onRightClick = { [weak self] e in self?.showPetMenu(e) }
         panel = p
         applyPosition()
         p.orderFrontRegardless()
@@ -908,7 +931,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// so the music controls never swallow a click meant for the app below.
     private func startHoverTracking() {
         let t = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
-            guard let self, let panel = self.panel, !self.moveMode else { return }
+            guard let self, let panel = self.panel, !self.moveMode, !self.menuOpen else { return }
             let over = self.petScreenRect().contains(NSEvent.mouseLocation)
             if panel.ignoresMouseEvents == over { panel.ignoresMouseEvents = !over }
         }
@@ -928,6 +951,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func petClicked() {
         guard ensureMediaTrust() else { return }
         MediaKey.post(MediaKey.play)
+    }
+
+    /// Right-click / ctrl-click on the pet opens the same menu as the menu bar
+    /// icon, so Dino stays controllable when that icon is unreachable (full
+    /// menu bar, notch, a hidden-items utility).
+    private func showPetMenu(_ event: NSEvent) {
+        guard let view = panel.contentView else { return }
+        let point = view.convert(event.locationInWindow, from: nil)
+        menuOpen = true
+        panel.ignoresMouseEvents = false
+        // Pop up on the next run loop turn: popUp() runs its own tracking loop,
+        // and opening it inside the mouse-down handler lets the matching
+        // mouse-up land in that loop and dismiss the menu immediately.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            defer { self.menuOpen = false }
+            self.makeMenu().popUp(positioning: nil, at: point, in: view)
+        }
     }
 
     private func petScrolled(_ dy: CGFloat) {
@@ -968,6 +1009,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         applyStatusIcon()
         statusItem.menu = makeMenu()
+        // The item's window has no frame until the bar lays out; check later.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            self?.warnIfStatusIconHidden()
+        }
+    }
+
+    /// On a notched Mac a full menu bar parks the overflow status items behind
+    /// the camera housing, where macOS draws nothing and no click lands. Say so
+    /// once instead of leaving the user hunting for a 🦖 that cannot appear.
+    private func warnIfStatusIconHidden() {
+        guard let screen = NSScreen.main,
+              let frame = statusItem.button?.window?.frame,
+              let left = screen.auxiliaryTopLeftArea?.maxX,
+              let right = screen.auxiliaryTopRightArea?.minX,
+              right > left else { return }
+        let notch = NSRect(x: left, y: frame.minY, width: right - left, height: frame.height)
+        guard notch.intersects(frame) else { return }
+        model.push(state: .idle, title: "Dino",
+                   message: "Menu bar đầy nên icon bị notch che. Chuột phải vào pet để mở menu.",
+                   ttl: 12)
     }
 
     private func applyStatusIcon() {
