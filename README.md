@@ -99,14 +99,33 @@ make build && curl -s localhost:7654/notify -d '{"state":"done","message":"build
            || curl -s localhost:7654/notify -d '{"state":"error","message":"build failed"}'
 ```
 
-## 4. Menu bar 🦖
+## 4. Menu: trên menu bar 🦖 hoặc **chuột phải vào pet**
 
 - **Test bubble** — thử hiển thị
 - **Move mode** — bật để kéo dino tự do (tắt click-through), nhớ tắt lại
 - **Vị trí** — snap về 1 trong 4 góc
+- **Nhân vật / Kích thước** — đổi skin, đổi cỡ sprite
 - **Quit**
 
 Mặc định `ignoresMouseEvents = true` nên dino không bao giờ chắn click của bạn.
+
+**Chuột phải (hoặc ctrl-click) lên pet mở đúng menu đó** — kể cả khi đang bật Move
+mode. Dùng khi icon trên menu bar không bấm được:
+
+> **MacBook có notch:** macOS xếp status item từ phải sang trái và dừng ở notch.
+> Menu bar đầy (nhiều icon) → icon 🦖 bị đẩy **vào sau notch**, macOS không vẽ và
+> không nhận click — không phải app lỗi. Dino tự phát hiện và nhắc bằng bubble lúc
+> khởi động. Muốn icon hiện lại: ⌘-kéo bớt một icon ra khỏi menu bar, hoặc thu hẹp
+> khoảng cách icon:
+>
+> ```bash
+> defaults -currentHost write -globalDomain NSStatusItemSpacing -int 6
+> defaults -currentHost write -globalDomain NSStatusItemSelectionPadding -int 6
+> killall SystemUIServer
+> ```
+>
+> (gỡ lại bằng `defaults -currentHost delete -globalDomain NSStatusItemSpacing`,
+> tương tự với `NSStatusItemSelectionPadding`, rồi `killall SystemUIServer`.)
 
 ## 5. Chạy khi khởi động
 
@@ -119,6 +138,7 @@ System Settings → General → Login Items → `+` → `~/Applications/Dino.app
 | Đổi port | env `DINO_PORT=9000` khi launch |
 | Đổi sprite | Đặt file `dino.png` cạnh `main.swift` rồi `./build.sh` (hoặc set env `DINO_IMAGE=/path/to/img.png`). Không có file → fallback về emoji 🦖 |
 | Sprite khi đang chạy | Đặt GIF `dino-working.gif` cạnh `main.swift` (hoặc env `DINO_WORKING_IMAGE`) — tự play khi state = working, hết working thì về `dino.png` |
+| Mở menu khi không thấy icon 🦖 | Chuột phải / ctrl-click thẳng vào pet (xem mục 4) |
 | Theo nhạc đang phát | Menu bar → **🎵 Theo nhạc đang phát** (mặc định bật). Pet nhảy khi có tiếng, hiện bubble tên bài khi đổi bài, **click vào pet** = play/pause, **cuộn trên pet** = bài kế/bài trước. Xem mục 7 về quyền |
 | Thêm pet mới | Menu bar → **Nhân vật** → **Thêm pet từ link…** → dán link `codex-pets.net/#/pets/<id>` (tự prefill nếu link đang ở clipboard). App tải spritesheet về `~/Library/Application Support/Dino/pets/<id>/`, cắt frame và chuyển sang pet mới luôn — không cần rebuild |
 | Zoom sprite | Menu bar → **Kích thước** → Nhỏ 56 / Vừa 80 / Lớn 110 / Bự 150pt (lưu vào UserDefaults) |
